@@ -79,8 +79,8 @@ if analyze_button:
     
     st.markdown("---")
     
-    # 4. BTTS & Goals Markets
-    st.subheader("⚽ Goals & BTTS Markets")
+    # 4. BTTS & Total Goals Markets (Match Over/Under)
+    st.subheader("⚽ Total Match Goals & BTTS Markets")
     btts_prob = (1 - poisson.pmf(0, h_lambda)) * (1 - poisson.pmf(0, a_lambda)) * 100
     if btts_prob > 55:
         st.success(f"✅ **Both Teams to Score (BTTS - Yes):** Strongly Recommended (`{btts_prob:.1f}%`)")
@@ -90,23 +90,41 @@ if analyze_button:
     total_goals_exp = h_lambda + a_lambda
     st.info(f"📊 Expected Total Match Goals: **{total_goals_exp:.2f}**")
     
-    prob_over_15 = (1 - np.sum(poisson_matrix[0, 0] + poisson_matrix[0, 1] + poisson_matrix[1, 0])) * 100
-    prob_over_25 = (1 - np.sum([poisson_matrix[i, j] for i in range(4) for j in range(4) if i + j <= 2])) * 100
-    st.write(f"- Over **1.5 Goals:** `{prob_over_15:.1f}%` | Over **2.5 Goals:** `{prob_over_25:.1f}%` -")
+    # Detailed Match Over/Under Lines (0.5 to 4.5)
+    st.markdown("**Detailed Total Goals Probabilities (Over / Under):**")
+    lines = [0.5, 1.5, 2.5, 3.5, 4.5]
+    for line in lines:
+        under_prob = sum(poisson.pmf(k, total_goals_exp) for k in range(int(line) + 1)) * 100
+        over_prob = 100 - under_prob
+        st.write(f"- Over **{line}**: `{over_prob:.1f}%` | Under **{line}**: `{under_prob:.1f}%`")
 
     st.markdown("---")
 
-    # 5. Winning Margin
-    st.subheader("⚖️ Winning Margin Analysis")
+    # 5. Team Specific Goals Markets (Home Team & Away Team Totals)
+    st.subheader("🥅 Team Goals Markets (Over / Under)")
+    
+    st.markdown(f"**{home_team} Team Goals:**")
+    for line in [0.5, 1.5, 2.5]:
+        h_under = sum(poisson.pmf(k, h_lambda) for k in range(int(line) + 1)) * 100
+        h_over = 100 - h_under
+        st.write(f"- Over **{line}**: `{h_over:.1f}%` | Under **{line}**: `{h_under:.1f}%`")
+        
+    st.markdown(f"**{away_team} Team Goals:**")
+    for line in [0.5, 1.5, 2.5]:
+        a_under = sum(poisson.pmf(k, a_lambda) for k in range(int(line) + 1)) * 100
+        a_over = 100 - a_under
+        st.write(f"- Over **{line}**: `{a_over:.1f}%` | Under **{line}**: `{a_under:.1f}%`")
+
+    st.markdown("---")
+
+    # 6. Winning Margin & Halves
+    st.subheader("⚖️ Winning Margin & Halves Insights")
     if abs(h_lambda - a_lambda) > 0.6:
         favored = home_team if h_lambda > a_lambda else away_team
         st.info(f"🔥 Expecting **{favored}** to win by a comfortable margin (1+ goals).")
     else:
         st.info("⚖️ Closely contested match expected; likely a tight margin or a draw.")
-
-    # 6. Halves Market Insights
-    st.subheader("⏱️ Halves Market Insights")
-    st.write("🔹 Statistical trends indicate the second half typically sees higher scoring activity due to fatigue and tactical substitutions.")
+    st.write("⏱️ **Halves Trend:** Statistical models indicate higher scoring rates in the second half due to tactical adjustments and fatigue.")
 
 else:
     st.info("👈 Please input the team statistics from the sidebar and click **Run Comprehensive Analysis** to display all predictions.")
