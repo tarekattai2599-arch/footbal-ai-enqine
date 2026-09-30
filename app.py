@@ -3,128 +3,141 @@ import numpy as np
 from scipy.stats import poisson
 
 st.set_page_config(page_title="Pro Football AI Engine", layout="centered")
-
 st.title("⚽ Pro Football AI Engine")
-st.subheader("📊 Ultimate Match Predictor & Comprehensive Analysis")
+st.subheader("📊 Match Predictor (Attack/Defence + Dixon-Coles)")
 
-st.sidebar.header("Match Data Input (WhoScored)")
+MAX_G = 8
 
-# Team Names Selection
-home_team = st.sidebar.text_input("Home Team", "Barcelona")
-away_team = st.sidebar.text_input("Away Team", "Real Madrid")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📈 Home Team Statistics")
-home_xg = st.sidebar.number_input("Home xG", min_value=0.0, max_value=50.0, value=15.17, step=0.01)
-home_goals = st.sidebar.number_input("Home Goals", min_value=0, max_value=100, value=16, step=1)
-home_xg_diff = st.sidebar.number_input("Home xGDiff", min_value=-20.0, max_value=20.0, value=0.83, step=0.01)
-home_shots = st.sidebar.number_input("Home Shots", min_value=0, max_value=500, value=84, step=1)
-home_rating = st.sidebar.number_input("Home Rating", min_value=0.0, max_value=10.0, value=7.28, step=0.01)
+# ---------- Model ----------
+def per_match(xg, goals, n, w_xg):
+    """Blend xG and actual goals into a per-match rate (xG is more stable)."""
+    return (w_xg * xg + (1 - w_xg) * goals) / n
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📉 Away Team Statistics")
-away_xg = st.sidebar.number_input("Away xG", min_value=0.0, max_value=50.0, value=14.59, step=0.01)
-away_goals = st.sidebar.number_input("Away Goals", min_value=0, max_value=100, value=13, step=1)
-away_xg_diff = st.sidebar.number_input("Away xGDiff", min_value=-20.0, max_value=20.0, value=-1.59, step=0.01)
-away_shots = st.sidebar.number_input("Away Shots", min_value=0, max_value=500, value=104, step=1)
-away_rating = st.sidebar.number_input("Away Rating", min_value=0.0, max_value=10.0, value=7.05, step=0.01)
 
-matches_played = st.sidebar.number_input("Matches Played", min_value=1, max_value=38, value=6, step=1)
+def shrink(rate, league_avg, n, k):
+    """Pull small-sample rates toward the league average."""
+    return (n * rate + k * league_avg) / (n + k)
 
-analyze_button = st.sidebar.button("🚀 Run Comprehensive Analysis")
 
-if analyze_button:
-    st.markdown(f"### 🏟️ Match Analysis: **{home_team}** vs **{away_team}**")
-    
-    # Lambda calculation based on weighted parameters
-    h_lambda = ((home_xg / matches_played) * 0.4) + ((home_goals / matches_played) * 0.4) + ((home_rating / 10) * 0.2)
-    a_lambda = ((away_xg / matches_played) * 0.4) + ((away_goals / matches_played) * 0.4) + ((away_rating / 10) * 0.2)
-    
-    # Poisson matrix distribution
-    max_goals = 6
-    poisson_matrix = np.outer(
-        [poisson.pmf(i, h_lambda) for i in range(max_goals + 1)],
-        [poisson.pmf(j, a_lambda) for j in range(max_goals + 1)]
-    )
-    
-    # 1. Match Result Probabilities
-    home_win_prob = np.sum(np.tril(poisson_matrix, -1)) * 100
-    draw_prob = np.sum(np.diag(poisson_matrix)) * 100
-    away_win_prob = np.sum(np.triu(poisson_matrix, 1)) * 100
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric(f"{home_team} Win", f"{home_win_prob:.1f}%")
-    col2.metric("Draw", f"{draw_prob:.1f}%")
-    col3.metric(f"{away_team} Win", f"{away_win_prob:.1f}%")
-    
-    st.markdown("---")
-    
-    # 2. Exact Correct Score Prediction
-    max_idx = np.unravel_index(np.argmax(poisson_matrix), poisson_matrix.shape)
-    best_home_score, best_away_score = max_idx[0], max_idx[1]
-    exact_score_prob = poisson_matrix[max_idx] * 100
-    st.subheader("🎯 Most Probable Correct Score")
-    st.success(f"Predicted Score Line: **{home_team} {best_home_score} - {best_away_score} {away_team}** (Probability: `{exact_score_prob:.1f}%`)")
-    
-    st.markdown("---")
-    
-    # 3. Double Chance Market
-    st.subheader("🛡️ Double Chance Market")
-    dc_1x = home_win_prob + draw_prob
-    dc_x2 = away_win_prob + draw_prob
-    dc_12 = home_win_prob + away_win_prob
-    st.write(f"🔹 **{home_team} or Draw (1X):** `{dc_1x:.1f}%`")
-    st.write(f"🔹 **{away_team} or Draw (X2):** `{dc_x2:.1f}%`")
-    st.write(f"🔹 **Either Team to Win (12):** `{dc_12:.1f}%`")
-    
-    st.markdown("---")
-    
-    # 4. BTTS & Total Goals Markets (Match Over/Under)
-    st.subheader("⚽ Total Match Goals & BTTS Markets")
-    btts_prob = (1 - poisson.pmf(0, h_lambda)) * (1 - poisson.pmf(0, a_lambda)) * 100
-    if btts_prob > 55:
-        st.success(f"✅ **Both Teams to Score (BTTS - Yes):** Strongly Recommended (`{btts_prob:.1f}%`)")
-    else:
-        st.warning(f"⚠️ **Both Teams to Score (BTTS - No/Uncertain):** Estimated at `{btts_prob:.1f}%`")
-        
-    total_goals_exp = h_lambda + a_lambda
-    st.info(f"📊 Expected Total Match Goals: **{total_goals_exp:.2f}**")
-    
-    # Detailed Match Over/Under Lines (0.5 to 4.5)
-    st.markdown("**Detailed Total Goals Probabilities (Over / Under):**")
-    lines = [0.5, 1.5, 2.5, 3.5, 4.5]
-    for line in lines:
-        under_prob = sum(poisson.pmf(k, total_goals_exp) for k in range(int(line) + 1)) * 100
-        over_prob = 100 - under_prob
-        st.write(f"- Over **{line}**: `{over_prob:.1f}%` | Under **{line}**: `{under_prob:.1f}%`")
+def dc_tau(i, j, lh, la, rho):
+    if i == 0 and j == 0:
+        return 1 - lh * la * rho
+    if i == 0 and j == 1:
+        return 1 + lh * rho
+    if i == 1 and j == 0:
+        return 1 + la * rho
+    if i == 1 and j == 1:
+        return 1 - rho
+    return 1.0
 
-    st.markdown("---")
 
-    # 5. Team Specific Goals Markets (Home Team & Away Team Totals)
-    st.subheader("🥅 Team Goals Markets (Over / Under)")
-    
-    st.markdown(f"**{home_team} Team Goals:**")
-    for line in [0.5, 1.5, 2.5]:
-        h_under = sum(poisson.pmf(k, h_lambda) for k in range(int(line) + 1)) * 100
-        h_over = 100 - h_under
-        st.write(f"- Over **{line}**: `{h_over:.1f}%` | Under **{line}**: `{h_under:.1f}%`")
-        
-    st.markdown(f"**{away_team} Team Goals:**")
-    for line in [0.5, 1.5, 2.5]:
-        a_under = sum(poisson.pmf(k, a_lambda) for k in range(int(line) + 1)) * 100
-        a_over = 100 - a_under
-        st.write(f"- Over **{line}**: `{a_over:.1f}%` | Under **{line}**: `{a_under:.1f}%`")
+def score_matrix(lh, la, rho):
+    ph = poisson.pmf(np.arange(MAX_G + 1), lh)
+    pa = poisson.pmf(np.arange(MAX_G + 1), la)
+    m = np.outer(ph, pa)
+    for i in range(2):
+        for j in range(2):
+            m[i, j] *= dc_tau(i, j, lh, la, rho)
+    return m / m.sum()
+
+
+# ---------- Sidebar ----------
+sb = st.sidebar
+sb.header("Match Data Input")
+home_team = sb.text_input("Home Team", "Barcelona")
+away_team = sb.text_input("Away Team", "Real Madrid")
+
+sb.markdown("---")
+sb.subheader("🏆 League settings")
+lg_home = sb.number_input("League avg home goals/match", 0.5, 3.0, 1.50, 0.01)
+lg_away = sb.number_input("League avg away goals/match", 0.5, 3.0, 1.20, 0.01)
+
+sb.markdown("---")
+sb.subheader("📈 Home team (totals over N matches)")
+h_n = sb.number_input("Home matches played", 1, 60, 6, 1)
+h_xgf = sb.number_input("Home xG for", 0.0, 150.0, 15.17, 0.01)
+h_xga = sb.number_input("Home xG against", 0.0, 150.0, 7.00, 0.01)
+h_gf = sb.number_input("Home goals for", 0, 200, 16, 1)
+h_ga = sb.number_input("Home goals against", 0, 200, 6, 1)
+
+sb.markdown("---")
+sb.subheader("📉 Away team (totals over N matches)")
+a_n = sb.number_input("Away matches played", 1, 60, 6, 1)
+a_xgf = sb.number_input("Away xG for", 0.0, 150.0, 14.59, 0.01)
+a_xga = sb.number_input("Away xG against", 0.0, 150.0, 7.00, 0.01)
+a_gf = sb.number_input("Away goals for", 0, 200, 13, 1)
+a_ga = sb.number_input("Away goals against", 0, 200, 6, 1)
+
+sb.markdown("---")
+sb.subheader("⚙️ Model tuning")
+w_xg = sb.slider("Weight of xG vs goals", 0.0, 1.0, 0.6, 0.05)
+k = sb.slider("Shrinkage (prior matches)", 0, 30, 10, 1)
+rho = sb.slider("Dixon-Coles rho", -0.20, 0.0, -0.08, 0.01)
+
+go = sb.button("🚀 Run Analysis")
+
+# ---------- Main ----------
+if go:
+    lg_avg = (lg_home + lg_away) / 2
+
+    h_att = shrink(per_match(h_xgf, h_gf, h_n, w_xg), lg_avg, h_n, k) / lg_avg
+    h_def = shrink(per_match(h_xga, h_ga, h_n, w_xg), lg_avg, h_n, k) / lg_avg
+    a_att = shrink(per_match(a_xgf, a_gf, a_n, w_xg), lg_avg, a_n, k) / lg_avg
+    a_def = shrink(per_match(a_xga, a_ga, a_n, w_xg), lg_avg, a_n, k) / lg_avg
+
+    lh = lg_home * h_att * a_def
+    la = lg_away * a_att * h_def
+
+    m = score_matrix(lh, la, rho)
+
+    st.markdown(f"### 🏟️ **{home_team}** vs **{away_team}**")
+    c1, c2 = st.columns(2)
+    c1.metric(f"{home_team} xG expected", f"{lh:.2f}")
+    c2.metric(f"{away_team} xG expected", f"{la:.2f}")
+
+    p_home = np.tril(m, -1).sum() * 100
+    p_draw = np.trace(m) * 100
+    p_away = np.triu(m, 1).sum() * 100
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"{home_team} Win", f"{p_home:.1f}%")
+    c2.metric("Draw", f"{p_draw:.1f}%")
+    c3.metric(f"{away_team} Win", f"{p_away:.1f}%")
 
     st.markdown("---")
+    st.subheader("🎯 Most Probable Scores")
+    flat = [(m[i, j], i, j) for i in range(MAX_G + 1) for j in range(MAX_G + 1)]
+    for p, i, j in sorted(flat, reverse=True)[:5]:
+        st.write(f"- **{home_team} {i} - {j} {away_team}**: `{p*100:.1f}%`")
 
-    # 6. Winning Margin & Halves
-    st.subheader("⚖️ Winning Margin & Halves Insights")
-    if abs(h_lambda - a_lambda) > 0.6:
-        favored = home_team if h_lambda > a_lambda else away_team
-        st.info(f"🔥 Expecting **{favored}** to win by a comfortable margin (1+ goals).")
-    else:
-        st.info("⚖️ Closely contested match expected; likely a tight margin or a draw.")
-    st.write("⏱️ **Halves Trend:** Statistical models indicate higher scoring rates in the second half due to tactical adjustments and fatigue.")
+    st.markdown("---")
+    st.subheader("🛡️ Double Chance")
+    st.write(f"🔹 1X: `{p_home + p_draw:.1f}%`  |  X2: `{p_away + p_draw:.1f}%`  |  12: `{p_home + p_away:.1f}%`")
 
+    st.markdown("---")
+    st.subheader("⚽ Total Goals & BTTS")
+    btts = m[1:, 1:].sum() * 100
+    st.write(f"BTTS Yes: `{btts:.1f}%` | No: `{100 - btts:.1f}%`")
+    st.info(f"Expected total goals: **{lh + la:.2f}**")
+
+    tot = np.zeros(2 * MAX_G + 1)
+    for i in range(MAX_G + 1):
+        for j in range(MAX_G + 1):
+            tot[i + j] += m[i, j]
+    for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
+        under = tot[: int(line) + 1].sum() * 100
+        st.write(f"- Over **{line}**: `{100 - under:.1f}%` | Under: `{under:.1f}%`")
+
+    st.markdown("---")
+    st.subheader("🥅 Team Goals")
+    for name, marg in [(home_team, m.sum(axis=1)), (away_team, m.sum(axis=0))]:
+        st.markdown(f"**{name}**")
+        for line in [0.5, 1.5, 2.5]:
+            under = marg[: int(line) + 1].sum() * 100
+            st.write(f"- Over **{line}**: `{100 - under:.1f}%` | Under: `{under:.1f}%`")
+
+    st.markdown("---")
+    st.caption("Probabilities are model estimates. Compare against bookmaker odds to check calibration.")
 else:
-    st.info("👈 Please input the team statistics from the sidebar and click **Run Comprehensive Analysis** to display all predictions.")
+    st.info("👈 Enter team stats in the sidebar and click **Run Analysis**.")
