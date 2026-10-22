@@ -617,7 +617,7 @@ AR_TPL_SRC = [('Version {}', 'الإصدار {1}'),
 AR_EXACT.update(AR_VALS)
 # ---- v13 additions to the Arabic tables ----
 AR_LEAGUES.update({
-    "Egyptian Premier League": "الدوري المصري الممتاز",
+    "Egyptian Premier League": "الدوري المصري الممتاز", "Egyptian Premier League (upload CSV)": "الدوري المصري الممتاز (رفع CSV)",
     "Saudi Pro League": "الدوري السعودي للمحترفين",
     "UEFA Champions League": "دوري أبطال أوروبا",
     "UEFA Europa League": "الدوري الأوروبي (يوروبا ليج)",
@@ -854,7 +854,7 @@ SOURCES = {
     "Africa Cup of Nations (national teams)": ("intl", "African Cup of Nations"),
     "UEFA Nations League (national teams)": ("intl", "UEFA Nations League"),
     "Champions League (football-data.org free key)": ("fdorg", "CL"),
-    "Egyptian Premier League": ("espn", "egy.1"),
+    "Egyptian Premier League (upload CSV)": ("upload", ""),
     "Saudi Pro League": ("espn", "ksa.1"),
     "UEFA Champions League": ("espn", "uefa.champions"),
     "UEFA Europa League": ("espn", "uefa.europa"),
@@ -863,7 +863,7 @@ SOURCES = {
     "Any other competition (upload CSV)": ("upload", ""),
 }
 # the competitions Tarek follows most come first in every list
-_PRIORITY = ["Premier League (England)", "La Liga (Spain)", "Egyptian Premier League", "UEFA Champions League",
+_PRIORITY = ["Premier League (England)", "La Liga (Spain)", "Egyptian Premier League (upload CSV)", "UEFA Champions League",
              "Serie A (Italy)", "Bundesliga (Germany)", "Ligue 1 (France)", "UEFA Europa League",
              "UEFA Conference League", "UEFA Nations League (national teams)", "Africa Cup of Nations (national teams)",
              "CAF Champions League", "Russian Premier League", "Eredivisie (Netherlands)", "Liga Portugal",
@@ -2024,10 +2024,7 @@ DEFAULT_MARKETS = ["1", "X", "2", "1X", "X2", "12", "Over 1.5", "Over 2.5", "Und
 
 # ---------- football-data.org (free key): Champions League results and fixtures ----------
 def org_key():
-    try:
-        k = st.secrets.get("FOOTBALL_DATA_ORG_KEY", "")
-    except Exception:
-        k = ""
+    k = _secret("FOOTBALL_DATA_ORG_KEY")
     return k or st.session_state.get("fdorg_key", "")
 
 
@@ -2199,11 +2196,36 @@ def _espn_rows(js):
     return [r for r in out if r["HomeTeam"] and r["AwayTeam"]]
 
 
-def espn_range(slug, d0, d1):
+ESPN_STATE = {"dead": 0}
+
+
+def _espn_fetch(slug, d0, d1, depth=0):
+    """One date range. ESPN sometimes answers 400 to a request shape, so try several shapes, then halve the range."""
     today = pd.Timestamp.today().normalize()
     old = d1 < today - pd.Timedelta(days=21)
-    url = f"{ESPN}/{slug}/scoreboard?dates={d0:%Y%m%d}-{d1:%Y%m%d}&limit=1000"
-    return _espn_rows(fetch_json(url, f"espn-{slug}-{d0:%Y%m%d}-{d1:%Y%m%d}", max_age_h=24 * 3650 if old else 2))
+    age = 24 * 3650 if old else 2
+    base = f"{ESPN}/{slug}/scoreboard"
+    rng = f"{d0:%Y%m%d}-{d1:%Y%m%d}" if d1 > d0 else f"{d0:%Y%m%d}"
+    for suffix, tag in ((f"?dates={rng}&limit=500", "a"), (f"?dates={rng}", "b")):
+        js = fetch_json(base + suffix, f"espn-{slug}-{d0:%Y%m%d}-{d1:%Y%m%d}-{tag}", max_age_h=age)
+        if isinstance(js, dict):
+            return _espn_rows(js)
+    span = (d1 - d0).days
+    if span >= 6 and depth < 2 and ESPN_STATE["dead"] < 3:
+        mid = d0 + pd.Timedelta(days=span // 2)
+        a = _espn_fetch(slug, d0, mid, depth + 1)
+        b = _espn_fetch(slug, mid + pd.Timedelta(days=1), d1, depth + 1)
+        return None if a is None and b is None else (a or []) + (b or [])
+    return None
+
+
+def espn_range(slug, d0, d1):
+    r = _espn_fetch(slug, d0, d1)
+    if r is None:
+        ESPN_STATE["dead"] += 1
+        return []
+    ESPN_STATE["dead"] = 0
+    return r
 
 
 def load_espn_history(slug, years):
@@ -2213,7 +2235,10 @@ def load_espn_history(slug, years):
     k0 = (cutoff - ESPN_EPOCH).days // ESPN_CHUNK
     k1 = (today - ESPN_EPOCH).days // ESPN_CHUNK
     rows, seen = [], set()
+    ESPN_STATE["dead"] = 0
     for k in range(k0, k1 + 1):
+        if ESPN_STATE["dead"] >= 3:
+            break
         d0 = ESPN_EPOCH + pd.Timedelta(days=k * ESPN_CHUNK)
         for r in espn_range(slug, d0, d0 + pd.Timedelta(days=ESPN_CHUNK - 1)):
             if r["Done"] and r["EventId"] not in seen:
@@ -2857,11 +2882,37 @@ ATT_REPLACE = 0.35      # a missing attacker's output is only partly replaced: l
 CTX_MIN, CTX_MAX = 0.82, 1.10
 
 
+def _file_secrets():
+    """secrets.toml found next to this file, in its parent folder or in the working folder (Streamlit itself only
+    reads a .streamlit folder, which is easy to get wrong)."""
+    out = {}
+    try:
+        import tomllib
+    except ImportError:
+        return out
+    here = os.path.dirname(os.path.abspath(globals().get("__file__", "app.py")))
+    for d in (os.getcwd(), os.path.dirname(here), here):
+        for sub in ("secrets.toml", os.path.join(".streamlit", "secrets.toml")):
+            p = os.path.join(d, sub)
+            try:
+                with open(p, "rb") as f:
+                    for k, v in tomllib.load(f).items():
+                        if isinstance(v, str) and v.strip():
+                            out[k] = v.strip()
+            except Exception:
+                continue
+    return out
+
+
+FILE_SECRETS = _file_secrets()
+
+
 def _secret(name):
     try:
-        return st.secrets.get(name, "")
+        v = st.secrets.get(name, "")
     except Exception:
-        return ""
+        v = ""
+    return v or FILE_SECRETS.get(name, "")
 
 
 def feed_keys():
@@ -3872,7 +3923,9 @@ def ui_data(years, half_life, wx_user, fuse_on):
                      ("football-data.co.uk (fixtures)", f"{FD}/fixtures.csv"),
                      ("openfootball (GitHub)", f"{OFB}/{_season_dash()}/it.1.json"),
                      ("International results (GitHub)", INTL_URL),
-                     ("ESPN (Egypt league scoreboard)", f"{ESPN}/egy.1/scoreboard"),
+                     ("ESPN (Saudi league)", f"{ESPN}/ksa.1/scoreboard"),
+                     ("ESPN (Europa League)", f"{ESPN}/uefa.europa/scoreboard"),
+                     ("ESPN (CAF Champions League)", f"{ESPN}/caf.champions/scoreboard"),
                      ("Understat (EPL)", f"{UNDERSTAT_URL}/EPL/{_season_tag()[:2] and (pd.Timestamp.today().year if pd.Timestamp.today().month >= 7 else pd.Timestamp.today().year - 1)}",
                       {**UA, "X-Requested-With": "XMLHttpRequest", "Referer": "https://understat.com/league/EPL"}),
                      ("ClubElo", "http://api.clubelo.com/" + str(dt.date.today())),
