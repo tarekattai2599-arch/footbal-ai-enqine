@@ -1109,12 +1109,12 @@ def fit_dc(df, xi, wx=0.0):
     m10, m11 = (xg_ == 1) & (yg_ == 0), (xg_ == 1) & (yg_ == 1)
 
     def unpack(p):
-        return p[:n] - p[:n].mean(), p[n:2 * n] - p[n:2 * n].mean(), p[2 * n], p[2 * n + 1]
+        return p[:n] - p[:n].mean(), p[n:2 * n] - p[n:2 * n].mean(), p[2 * n], p[2 * n + 1], p[2 * n + 2]
 
     def fun(p):
-        att, dfn, home, rho = unpack(p)
-        el = att[hi] + dfn[ai] + home * hv
-        em = att[ai] + dfn[hi]
+        att, dfn, home, rho, c0 = unpack(p)
+        el = c0 + att[hi] + dfn[ai] + home * hv
+        em = c0 + att[ai] + dfn[hi]
         lam, mu = np.exp(el), np.exp(em)
         tau, dtl, dtm, dtr = np.ones_like(lam), np.zeros_like(lam), np.zeros_like(lam), np.zeros_like(lam)
         lm = lam * mu
@@ -1136,17 +1136,18 @@ def fit_dc(df, xi, wx=0.0):
         gm = w * (y - mu + dtm / tau)
         ga = np.bincount(hi, gl, n) + np.bincount(ai, gm, n)
         gd = np.bincount(ai, gl, n) + np.bincount(hi, gm, n)
-        g = np.concatenate([ga - ga.mean(), gd - gd.mean(), [(gl * hv).sum(), (w * dtr / tau).sum()]])
+        g = np.concatenate([ga - ga.mean(), gd - gd.mean(), [(gl * hv).sum(), (w * dtr / tau).sum(), (gl + gm).sum()]])
         g = -g
         g[:2 * n] += 2 * RIDGE * p[:2 * n]
         return f, g
 
-    p0 = np.zeros(2 * n + 2)
+    p0 = np.zeros(2 * n + 3)
     p0[2 * n] = 0.25
-    bounds = [(-3, 3)] * (2 * n) + [(-0.5, 1.0), (-0.3, 0.3)]
+    p0[2 * n + 2] = float(np.log(max(0.3, (x.mean() + y.mean()) / 2)))
+    bounds = [(-3, 3)] * (2 * n) + [(-0.5, 1.0), (-0.3, 0.3), (-2.0, 2.0)]
     res = minimize(fun, p0, jac=True, method="L-BFGS-B", bounds=bounds, options={"maxiter": 500})
-    att, dfn, home, rho = unpack(res.x)
-    return {"teams": teams, "idx": idx, "att": att, "dfn": dfn, "home": home, "rho": rho}
+    att, dfn, home, rho, c0 = unpack(res.x)
+    return {"teams": teams, "idx": idx, "att": att, "dfn": dfn, "home": home, "rho": rho, "c": float(c0)}
 
 
 @st.cache_data(show_spinner="Training model...")
@@ -1157,8 +1158,9 @@ def get_model(df, xi, wx):
 def lambdas(model, h, a, neutral=False):
     i, j = model["idx"][h], model["idx"][a]
     hadv = 0.0 if neutral else model["home"]
-    return (np.exp(model["att"][i] + model["dfn"][j] + hadv),
-            np.exp(model["att"][j] + model["dfn"][i]))
+    c0 = model.get("c", 0.0)
+    return (np.exp(c0 + model["att"][i] + model["dfn"][j] + hadv),
+            np.exp(c0 + model["att"][j] + model["dfn"][i]))
 
 
 def score_matrix(lam, mu, rho):
@@ -2633,6 +2635,16 @@ def _con():
     con.execute("CREATE TABLE IF NOT EXISTS context(fixture_id INTEGER PRIMARY KEY, data TEXT, fetched TEXT)")
     con.execute("CREATE TABLE IF NOT EXISTS picks(fixture_id INTEGER, sel TEXT, p REAL, created TEXT, "
                 "PRIMARY KEY(fixture_id, sel))")
+    con.execute("CREATE TABLE IF NOT EXISTS app_flags(k TEXT PRIMARY KEY)")
+    if not con.execute("SELECT 1 FROM app_flags WHERE k='dc_intercept_v13'").fetchone():
+        con.execute("DELETE FROM league_calib")
+        con.execute("INSERT INTO app_flags VALUES('dc_intercept_v13')")
+        con.commit()
+    for _c in ("verdict TEXT", "grade TEXT", "agree TEXT", "risk REAL"):
+        try:
+            con.execute(f"ALTER TABLE picks ADD COLUMN {_c}")
+        except sqlite3.OperationalError:
+            pass
     return con
 
 
@@ -3319,8 +3331,15 @@ def save_picks(fxs, allowed, min_p, min_fair):
             chosen.add(bp["sel"])
         for k in chosen:
             p = next(s["p"] for s in f["sels"] if s["sel"] == k)
-            db_exec("INSERT OR REPLACE INTO picks(fixture_id,sel,p,created) VALUES(?,?,?,?)",
-                    (f["id"], k, float(p), dt.datetime.now().isoformat()))
+            pk_ = next(s for s in f["sels"] if s["sel"] == k)
+            try:
+                rk_ = risk_report(f, pk_)
+                ag_ = agreement(f, pk_)
+                vd_, gr_, rs_ = verdict(rk_, ag_, f), confidence(f, pk_, rk_, ag_)[1], float(rk_["risk"])
+            except Exception:
+                vd_, gr_, ag_, rs_ = None, None, None, None
+            db_exec("INSERT OR REPLACE INTO picks(fixture_id,sel,p,created,verdict,grade,agree,risk) VALUES(?,?,?,?,?,?,?,?)",
+                    (f["id"], k, float(p), dt.datetime.now().isoformat(), vd_, gr_, ag_, rs_))
 
 
 # ---------- free news headlines (no key needed) ----------
@@ -3874,27 +3893,67 @@ def ui_assistant(years, half_life, wx_user, fuse_on):
 
 def ui_track(years, half_life, wx_user, fuse_on):
     st.markdown("#### Track record")
-    pk = db_read("SELECT p.fixture_id, p.sel, p.p, f.league, f.home, f.away, f.kickoff FROM picks p "
+    pk = db_read("SELECT p.fixture_id, p.sel, p.p, p.verdict, p.grade, p.agree, f.league, f.home, f.away, f.kickoff FROM picks p "
                  "JOIN fixtures f ON f.id = p.fixture_id")
     if pk.empty:
         st.info("Nothing yet. Picks are saved automatically when you open the Analysis tab for upcoming matches.")
         return
+    db_exec("CREATE TABLE IF NOT EXISTS results_manual(fixture_id INTEGER PRIMARY KEY, hg INTEGER, ag INTEGER)")
+    manual = {int(x.fixture_id): (int(x.hg), int(x.ag)) for x in db_read("SELECT * FROM results_manual").itertuples()}
+    espn_cache = {}
     rows = []
     for r in pk.itertuples():
         b = league_bundle(r.league, years, half_life, wx_user, fuse_on)
-        res = None
-        if b is not None and r.kickoff:
+        res = manual.get(int(r.fixture_id))
+        if res is None and r.kickoff:
             kd = pd.Timestamp(r.kickoff)
-            d = b["df"]
-            m = d[(d.HomeTeam == r.home) & (d.AwayTeam == r.away) &
-                  (d.Date >= kd - pd.Timedelta(days=2)) & (d.Date <= kd + pd.Timedelta(days=3))]
-            if len(m):
-                res = (int(m.iloc[0].FTHG), int(m.iloc[0].FTAG))
+            if b is not None:
+                d = b["df"]
+                tms = sorted(set(d.HomeTeam) | set(d.AwayTeam))
+                hn, an = match_team(r.home, tms) or r.home, match_team(r.away, tms) or r.away
+                m = d[(d.HomeTeam == hn) & (d.AwayTeam == an) &
+                      (d.Date >= kd - pd.Timedelta(days=2)) & (d.Date <= kd + pd.Timedelta(days=3))]
+                if len(m):
+                    res = (int(m.iloc[0].FTHG), int(m.iloc[0].FTAG))
+            slug = espn_slug(r.league)
+            if res is None and slug and kd <= pd.Timestamp.today():
+                if slug not in espn_cache:
+                    espn_cache[slug] = espn_recent_results(slug, 60)
+                er = espn_cache[slug]
+                if len(er):
+                    hn2 = match_team(r.home, sorted(set(er.HomeTeam)))
+                    an2 = match_team(r.away, sorted(set(er.AwayTeam)))
+                    m = er[(er.HomeTeam == hn2) & (er.AwayTeam == an2) &
+                           (er.Date >= kd.normalize() - pd.Timedelta(days=2)) & (er.Date <= kd.normalize() + pd.Timedelta(days=3))]
+                    if len(m):
+                        res = (int(m.iloc[0].FTHG), int(m.iloc[0].FTAG))
         rows.append({"Date": r.kickoff, "Match": f"{r.home} vs {r.away}", "Pick": r.sel, "Model %": round(r.p * 100, 1),
                      "Result": "pending" if res is None else f"{res[0]}-{res[1]}",
-                     "Hit": None if res is None else sel_hit(r.sel, *res), "_p": r.p})
+                     "Hit": None if res is None else sel_hit(r.sel, *res), "_p": r.p,
+                     "_v": r.verdict, "_g": r.grade, "_a": r.agree})
     t = pd.DataFrame(rows).sort_values("Date", ascending=False)
     g = t[t.Hit.notna()].copy()
+    pend = pk.merge(t[t.Result == "pending"][["Date", "Match"]].assign(k=1), how="inner",
+                    left_on=["kickoff", pk.home + " vs " + pk.away], right_on=["Date", "Match"]).drop_duplicates("fixture_id")
+    pend = pend[pd.to_datetime(pend.kickoff) <= pd.Timestamp.today()]
+    with st.expander(LX(f"Pending matches already played: enter the result yourself ({len(pend)})",
+                        f"مباريات معلقة لُعبت بالفعل: أدخل نتيجتها بنفسك ({len(pend)})")):
+        st.caption(LX("Results normally appear by themselves (football-data.co.uk is about a day late; ESPN is used "
+                      "as a backup). If a match stays pending, enter its score here and it is graded at once. "
+                      "Team names that differ between the source and your list are matched automatically.",
+                      "النتائج بتظهر تلقائيًا عادةً (football-data.co.uk بيتأخر نحو يوم، وESPN احتياطي). لو مباراة "
+                      "فضلت معلقة اكتب نتيجتها هنا وتتحسب فورًا. اختلاف أسماء الفرق بين المصدر وقائمتك بيتعالج تلقائيًا."))
+        if st.button(LX("Refresh data now", "حدّث البيانات الآن"), key="trk_refresh"):
+            st.cache_data.clear()
+            st.rerun()
+        for x in pend.itertuples():
+            cc = st.columns([4, 1, 1, 1])
+            cc[0].write(f"{x.home} vs {x.away} ({x.kickoff})")
+            hg = cc[1].number_input("H", 0, 20, 0, key=f"mr_h_{x.fixture_id}", label_visibility="collapsed")
+            ag = cc[2].number_input("A", 0, 20, 0, key=f"mr_a_{x.fixture_id}", label_visibility="collapsed")
+            if cc[3].button(LX("Save", "حفظ"), key=f"mr_s_{x.fixture_id}"):
+                db_exec("INSERT OR REPLACE INTO results_manual VALUES(?,?,?)", (int(x.fixture_id), int(hg), int(ag)))
+                st.rerun()
     if g.empty:
         st.info("Matches are still pending. Results appear automatically once the data source publishes them "
                 "(usually within a day).")
@@ -3910,7 +3969,20 @@ def ui_track(years, half_life, wx_user, fuse_on):
         cal["Model"] = (cal["Model"] * 100).round(1)
         st.markdown("**Calibration** (hit rate should be close to the model percentage; small samples are noisy)")
         st.dataframe(cal.rename(columns={"Hit_rate": "Hit rate %", "Model": "Model %"}), use_container_width=True)
-    st.dataframe(t.drop(columns="_p"), hide_index=True, use_container_width=True)
+    if not g.empty and g["_v"].notna().any():
+        parts = []
+        for col, nm in (("_v", "Verdict"), ("_g", "Grade"), ("_a", "Sources")):
+            h = g[g[col].notna()].groupby(col).agg(Picks=("Hit", "size"), Hit=("Hit", "mean"), Model=("_p", "mean"))
+            for k, x in h.iterrows():
+                parts.append({"Group": nm, "Value": k, "Picks": int(x.Picks), "Hit rate %": round(x.Hit * 100, 1),
+                              "Model %": round(x.Model * 100, 1)})
+        if parts:
+            st.markdown(LX("**Real hit rate of each class** (the test of whether 'Strong', grade A or 'all agree' "
+                           "really means safer; needs a few dozen graded picks to mean anything)",
+                           "**نسبة النجاح الفعلية لكل فئة** (اختبار هل 'قوي' أو التصنيف A أو 'كل المصادر متفقة' "
+                           "تعني فعلًا أمانًا أكثر؛ تحتاج بضع عشرات من الاختيارات المحسوبة لتعني شيئًا)"))
+            st.dataframe(pd.DataFrame(parts), hide_index=True, use_container_width=True)
+    st.dataframe(t.drop(columns=["_p", "_v", "_g", "_a"]), hide_index=True, use_container_width=True)
 
 
 def ui_data(years, half_life, wx_user, fuse_on):
