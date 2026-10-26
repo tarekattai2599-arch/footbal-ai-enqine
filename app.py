@@ -878,7 +878,19 @@ ALIASES = {"Date": ["date"], "HomeTeam": ["Home", "home_team", "Home Team"],
            "FTHG": ["HG", "home_score", "home_goals", "home_goal"],
            "FTAG": ["AG", "away_score", "away_goals", "away_goal"],
            "HxG": ["home_xg", "xG_home", "xGH", "HomeXG", "home_xG"],
-           "AxG": ["away_xg", "xG_away", "xGAway", "AwayXG", "away_xG"]}
+           "AxG": ["away_xg", "xG_away", "xGAway", "AwayXG", "away_xG", "team_b_xg"],
+           # FootyStats / other CSV exports
+           "HC": ["home_team_corner_count", "HomeCorners", "home_corners"],
+           "AC": ["away_team_corner_count", "AwayCorners", "away_corners"],
+           "HS": ["home_team_shots", "HomeShots"], "AS": ["away_team_shots", "AwayShots"],
+           "HST": ["home_team_shots_on_target", "HomeShotsOnTarget"],
+           "AST": ["away_team_shots_on_target", "AwayShotsOnTarget"]}
+ALIASES["HomeTeam"] += ["home_team_name", "Home Team Name", "team_home", "HomeTeamName"]
+ALIASES["AwayTeam"] += ["away_team_name", "Away Team Name", "team_away", "AwayTeamName"]
+ALIASES["FTHG"] += ["home_team_goal_count", "HomeGoals", "FTHG_"]
+ALIASES["FTAG"] += ["away_team_goal_count", "AwayGoals", "FTAG_"]
+ALIASES["HxG"] += ["team_a_xg"]
+ALIASES["Date"] += ["date_GMT", "Date (GMT)", "match_date", "Match Date"]
 TEMPLATE = ("Date,HomeTeam,AwayTeam,FTHG,FTAG,HS,AS,HST,AST\n"
             "15/08/2025,Team A,Team B,2,1,14,9,6,3\n22/08/2025,Team B,Team C,0,0,8,10,2,4\n")
 
@@ -953,6 +965,14 @@ def net_failures(prefix):
 
 def normalize(df):
     df = df.copy()
+    if "status" in df.columns:        # exports that also list unplayed matches: keep the finished ones
+        st_ = df["status"].astype(str).str.lower()
+        if st_.isin(["complete", "finished", "ft", "full-time"]).any():
+            df = df[st_.isin(["complete", "finished", "ft", "full-time"])]
+    if "timestamp" in df.columns and not any(c in df.columns for c in ("Date", "date", "date_GMT")):
+        ts = pd.to_numeric(df["timestamp"], errors="coerce")
+        if ts.notna().any():
+            df["Date"] = pd.to_datetime(ts, unit="s", errors="coerce").dt.strftime("%Y-%m-%d")
     for std, alts in ALIASES.items():
         if std not in df.columns:
             for a in alts:
@@ -2015,6 +2035,27 @@ def render_players_tab():
 # ======================= MATCH BOARD (database + multi-league analysis) =======================
 DB_PATH = "football_board.db"
 BOARD_LEAGUES = [k for k, (kd, _) in SOURCES.items() if kd in ("fd", "new", "intl", "fdorg", "espn")]
+FOCUS = ["Premier League (England)", "La Liga (Spain)", "Serie A (Italy)", "Bundesliga (Germany)", "Ligue 1 (France)",
+         "Norway Eliteserien", "Sweden Allsvenskan", "Russian Premier League", "UEFA Champions League",
+         "UEFA Europa League", "UEFA Conference League", "Champions League (football-data.org free key)",
+         "UEFA Nations League (national teams)", "Africa Cup of Nations (national teams)"]
+
+
+def focus_on():
+    try:
+        return bool(st.session_state.get("focus_on", True))
+    except Exception:
+        return True
+
+
+def board_leagues():
+    return [k for k in BOARD_LEAGUES if k in FOCUS] if focus_on() else list(BOARD_LEAGUES)
+
+
+def source_options():
+    return [k for k in SOURCES if k in FOCUS] if focus_on() else list(SOURCES)
+
+
 FD_CODE_TO_LEAGUE = {code: name for name, (kd, code) in SOURCES.items() if kd == "fd"}
 OFB = "https://raw.githubusercontent.com/openfootball/football.json/master"
 OF = {"E0": "en.1", "E1": "en.2", "SP1": "es.1", "I1": "it.1", "D1": "de.1", "F1": "fr.1", "N1": "nl.1",
@@ -2927,6 +2968,103 @@ def _secret(name):
     return v or FILE_SECRETS.get(name, "")
 
 
+ODDS_SPORTS = {
+    "Premier League (England)": "soccer_epl", "Championship (England)": "soccer_efl_champ",
+    "La Liga (Spain)": "soccer_spain_la_liga", "Serie A (Italy)": "soccer_italy_serie_a",
+    "Bundesliga (Germany)": "soccer_germany_bundesliga", "Ligue 1 (France)": "soccer_france_ligue_one",
+    "Eredivisie (Netherlands)": "soccer_netherlands_eredivisie", "Liga Portugal": "soccer_portugal_primeira_liga",
+    "Super Lig (Turkey)": "soccer_turkey_super_league", "Belgian Pro League": "soccer_belgium_first_div",
+    "Scottish Premiership": "soccer_spl", "Greek Super League": "soccer_greece_super_league",
+    "Norway Eliteserien": "soccer_norway_eliteserien", "Sweden Allsvenskan": "soccer_sweden_allsvenskan",
+    "Brazil Serie A": "soccer_brazil_campeonato", "USA MLS": "soccer_usa_mls",
+    "Switzerland Super League": "soccer_switzerland_superleague", "Argentina Primera": "soccer_argentina_primera_division",
+    "Mexico Liga MX": "soccer_mexico_ligamx", "Japan J1 League": "soccer_japan_j_league",
+    "Denmark Superliga": "soccer_denmark_superliga", "Austria Bundesliga": "soccer_austria_bundesliga",
+    "Poland Ekstraklasa": "soccer_poland_ekstraklasa", "Bundesliga 2 (Germany)": "soccer_germany_bundesliga2",
+    "Serie B (Italy)": "soccer_italy_serie_b", "La Liga 2 (Spain)": "soccer_spain_segunda_division",
+    "Ligue 2 (France)": "soccer_france_ligue_two", "UEFA Champions League": "soccer_uefa_champs_league",
+    "UEFA Europa League": "soccer_uefa_europa_league", "UEFA Conference League": "soccer_uefa_europa_conference_league",
+    "Champions League (football-data.org free key)": "soccer_uefa_champs_league",
+    "Saudi Pro League": "soccer_saudi_arabia_pro_league",
+}
+
+
+def odds_key():
+    return _secret("ODDS_API_KEY") or st.session_state.get("odds_key", "")
+
+
+def fetch_market_odds(sport, key):
+    """Average decimal h2h odds per upcoming match from The Odds API: [(home, away, date, o1, ox, o2)], error text."""
+    try:
+        r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+                         params={"apiKey": key, "regions": "eu,uk", "markets": "h2h", "oddsFormat": "decimal"},
+                         timeout=20)
+    except Exception as e:
+        return [], f"{type(e).__name__}: {str(e)[:80]}"
+    if r.status_code != 200:
+        return [], f"HTTP {r.status_code}" + (" (check the key)" if r.status_code in (401, 403) else "")
+    out = []
+    for ev in r.json():
+        h, a = ev.get("home_team"), ev.get("away_team")
+        s = {"h": [], "d": [], "a": []}
+        for bk in ev.get("bookmakers", []):
+            for mk in bk.get("markets", []):
+                if mk.get("key") != "h2h":
+                    continue
+                for o in mk.get("outcomes", []):
+                    nm = o.get("name")
+                    (s["d"] if nm == "Draw" else s["h"] if nm == h else s["a"] if nm == a else []).append(o.get("price"))
+        if h and a and s["h"] and s["d"] and s["a"]:
+            out.append((h, a, str(ev.get("commence_time", ""))[:10],
+                        float(np.mean(s["h"])), float(np.mean(s["d"])), float(np.mean(s["a"]))))
+    return out, ""
+
+
+def ui_odds_feed():
+    with st.expander(LX("📡 Market odds feed (optional, free key from the-odds-api.com)",
+                        "📡 تغذية أسعار السوق (اختيارية، مفتاح مجاني من the-odds-api.com)")):
+        st.caption(LX("Bookmaker prices carry information the model cannot see (injuries, line-ups, news), so they are "
+                      "one of the strongest checks on a prediction. This only reads the prices to fill 'market' "
+                      "probabilities for the matches you already added; nothing about betting. About 1 request per "
+                      "league (the free plan gives 500 a month).",
+                      "أسعار شركات المراهنات تحمل معلومات لا يراها النموذج (إصابات وتشكيلات وأخبار)، فهي من أقوى "
+                      "وسائل مراجعة التوقع. هذا الخيار يقرأ الأسعار فقط ليملأ احتمالات 'السوق' للمباريات التي أضفتها "
+                      "بالفعل؛ لا علاقة له بالمراهنة. حوالي طلب واحد لكل دوري (الخطة المجانية 500 شهريًا)."))
+        st.text_input(LX("The Odds API key (kept only in this session)", "مفتاح The Odds API (يُحفظ في هذه الجلسة فقط)"),
+                      type="password", key="odds_key")
+        st.caption(LX("Or save it as ODDS_API_KEY in secrets.toml. Key found: ", "أو احفظه باسم ODDS_API_KEY في secrets.toml. المفتاح موجود: ")
+                   + ("✅" if odds_key() else "❌"))
+        if not st.button(LX("Fill market odds for my upcoming matches", "املأ أسعار السوق لمبارياتي القادمة"), key="odds_go"):
+            return
+        k = odds_key()
+        if not k:
+            st.error(LX("Enter your Odds API key first.", "أدخل مفتاح Odds API أولًا."))
+            return
+        fx = db_read("SELECT * FROM fixtures ORDER BY kickoff")
+        fx = fx[(fx.kickoff.isna()) | (fx.kickoff >= dt.date.today().isoformat())]
+        done, notes = 0, []
+        for lg in sorted(fx.league.unique()):
+            sport = ODDS_SPORTS.get(lg)
+            if not sport:
+                notes.append(f"{lg}: " + LX("no odds feed for this league", "لا توجد أسعار لهذا الدوري"))
+                continue
+            rows, err = fetch_market_odds(sport, k)
+            if err:
+                notes.append(f"{lg}: {err}")
+                continue
+            hn = sorted({r[0] for r in rows})
+            an = sorted({r[1] for r in rows})
+            for r in fx[fx.league == lg].itertuples():
+                h, a = match_team(r.home, hn), match_team(r.away, an)
+                m = next((x for x in rows if x[0] == h and x[1] == a), None)
+                if m:
+                    db_exec("UPDATE fixtures SET o1=?, ox=?, o2=? WHERE id=?", (m[3], m[4], m[5], int(r.id)))
+                    done += 1
+        (st.success if done else st.warning)(LX(f"Market prices added to {done} match(es).", f"أُضيفت أسعار السوق إلى {done} مباراة."))
+        if notes:
+            st.caption(" | ".join(notes))
+
+
 def feed_keys():
     prov = st.session_state.get("llm_prov_sel", "Groq (free)")
     name = "GROQ_API_KEY" if prov.startswith("Groq") else "ANTHROPIC_API_KEY"
@@ -3422,7 +3560,7 @@ def ai_research(api_key, model_id, f, max_uses):
 def ui_add_fixtures(years, half_life, wx_user, fuse_on):
     st.markdown("#### Add matches")
     c = st.columns([2, 1, 1])
-    league = c[0].selectbox("League", BOARD_LEAGUES, key="fx_league")
+    league = c[0].selectbox("League", board_leagues(), key="fx_league")
     kick = c[1].date_input("Match date", value=dt.date.today(), key="fx_date")
     neutral = c[2].checkbox("Neutral venue", value=league.endswith("(national teams)"), key=f"fx_neu_{league}")
     if SOURCES[league][0] == "fdorg" and not org_key():
@@ -3497,7 +3635,7 @@ def ui_add_fixtures(years, half_life, wx_user, fuse_on):
         st.caption("Pulls the published fixtures (with market odds when available) for the main leagues. "
                    "Leagues without a free fixture feed need manual entry above.")
         days = st.slider("Matches in the next N days", 1, 14, 5, key="imp_days")
-        fd_leagues = list(BOARD_LEAGUES)
+        fd_leagues = board_leagues()
         pick = st.multiselect("Leagues", fd_leagues, default=[], key="imp_leagues")
         if st.button("Fetch and add", key="imp_btn") and pick:
             fxd = load_fd_fixtures()
@@ -4013,7 +4151,7 @@ def ui_data(years, half_life, wx_user, fuse_on):
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.caption("A 404 for 'this season' is normal in the first weeks of a new season; the app then uses "
                        "the previous seasons. If everything FAILED, the problem is your internet / firewall / antivirus.")
-    leagues = st.multiselect("Show status for leagues", BOARD_LEAGUES, default=[], key="dt_leagues")
+    leagues = st.multiselect("Show status for leagues", board_leagues(), default=[], key="dt_leagues")
     rows = []
     for lg in leagues:
         b = league_bundle(lg, years, half_life, wx_user, fuse_on)
@@ -4041,7 +4179,7 @@ def ui_data(years, half_life, wx_user, fuse_on):
     st.caption("Tries a few settings (recency half-life and xG weight) and keeps the one that predicted the most "
                "recent matches best. It only switches away from the default when the gain is clear, so it does not "
                "chase noise. Takes about 30-60 seconds per league.")
-    tl = st.multiselect("Leagues to tune", BOARD_LEAGUES, default=[], key="tune_leagues")
+    tl = st.multiselect("Leagues to tune", board_leagues(), default=[], key="tune_leagues")
     if st.button("Tune selected leagues", key="tune_btn") and tl:
         for lg in tl:
             try:
@@ -4075,7 +4213,7 @@ def ui_data(years, half_life, wx_user, fuse_on):
     st.caption("Tests the model on each league's latest ~300 matches, one forecast at a time without peeking at the "
                "result, then keeps the Elo weight and confidence correction that predicted best. It also measures how "
                "often the model's 40%, 50%, 60%... forecasts really happen. Do this after 'Tune' (if you use it).")
-    cl = st.multiselect("Leagues to calibrate", BOARD_LEAGUES, default=[], key="cal_leagues")
+    cl = st.multiselect("Leagues to calibrate", board_leagues(), default=[], key="cal_leagues")
     if st.button("Calibrate selected leagues", key="cal_btn") and cl:
         for lg in cl:
             b0 = league_bundle(lg, years, half_life, wx_user, fuse_on)
@@ -4127,6 +4265,7 @@ def render_board(years, half_life, wx_user, fuse_on):
                     LX("🔎 Line-ups", "🔎 التشكيلات"), "📈 Track record", "🧰 Data & backup"])
     with tabs[0]:
         ui_add_fixtures(years, half_life, wx_user, fuse_on)
+        ui_odds_feed()
     with tabs[1]:
         ui_analysis(years, half_life, wx_user, fuse_on)
     with tabs[2]:
@@ -4153,6 +4292,7 @@ st.caption("Time-weighted Dixon-Coles model trained on real results, shots and x
 sb = st.sidebar
 page = sb.radio("Page", ["🗂️ Match board (multi-league)", "🎯 Single match deep-dive", "👥 Players"], key="page")
 sb.header("Settings")
+sb.checkbox(LX("Focus on the major leagues and cups", "التركيز على الدوريات والبطولات الكبرى"), True, key="focus_on")
 years = sb.slider("Years of history", 1, 6, 3)
 half_life = sb.slider("Recency half-life (days)", 60, 900, 300, 30)
 wx_user = sb.slider("xG / shots weight (0 = goals only)", 0.0, 1.0, 0.5, 0.05)
@@ -4165,7 +4305,7 @@ if page.startswith("👥"):
     render_players_tab()
     st.stop()
 
-src = sb.selectbox("Competition", list(SOURCES))
+src = sb.selectbox("Competition", source_options())
 kind, code = SOURCES[src]
 
 if kind == "upload":
