@@ -269,7 +269,7 @@ AR_PREFIX = [('Time-weighted Dixon-Coles model trained on real results',
  ('Risk % = chance the pick fails',
   'المخاطرة % = احتمال فشل الاختيار + عقوبات للبيانات الضعيفة أو اختلاف المصادر أو الراحة القصيرة أو التعديلات المبنية على الأخبار. منخفضة ≤ 25، '
   'متوسطة ≤ 40، وما فوق ذلك عالية. درجة البيانات: A = أكثر من 30 مباراة حديثة للفريقين، B = أكثر من 18، C = أقل. الحكم: قوي = مخاطرة منخفضة ومصادر '
-  "متفقة وبيانات كافية؛ مقبول = مخاطرة متوسطة بلا اختلاف؛ تجنّبه = غير ذلك. 'معايَر' = تم اختبار إعدادات الدوري على مبارياته الأخيرة (إعدادات "
+  "متفقة وبيانات كافية ودوري معايَر؛ متوسط الخطر = مخاطرة متوسطة بلا اختلاف؛ تجنّبه = غير ذلك. 'معايَر' = تم اختبار إعدادات الدوري على مبارياته الأخيرة (إعدادات "
   'التحليل أو تبويب البيانات).'),
  ('The model knows results, not news.',
   'النموذج يعرف النتائج لا الأخبار. اختر خيارًا مجانيًا أدناه للبحث عن الإصابات والإيقافات وأخبار التشكيل، ثم عدّل المباراة بنفسك.'),
@@ -333,7 +333,7 @@ AR_VALS = {'Low': 'منخفضة',
  'Medium': 'متوسطة',
  'High': 'عالية',
  'Strong': 'قوي ✅',
- 'OK': 'مقبول',
+ 'OK': 'متوسط الخطر',
  'Skip': 'تجنّبه ⛔',
  'all agree': 'كلهم متفقون',
  'split': 'منقسمون',
@@ -1551,10 +1551,10 @@ def agreement(f, pick):
 
 
 def verdict(rk, agree, f):
-    if rk["risk"] <= 25 and agree != "split" and f["grade"] != "C":
-        return "Strong"
+    if rk["risk"] <= 25 and agree != "split" and f["grade"] != "C" and f.get("calibrated"):
+        return "Strong"      # 'Strong' is only given when this league's model was calibrated on its own recent matches
     if rk["risk"] <= 40 and agree != "split":
-        return "OK"
+        return "OK"          # shown as 'medium risk' in Arabic
     return "Skip"
 
 
@@ -2136,7 +2136,7 @@ def load_clubelo(day):
     return d[["Club", "Country", "Elo"]].dropna()
 
 
-def clubelo_probs(league, home, away, neutral, d0):
+def clubelo_probs(league, home, away, neutral, d0, hfa=100.0):
     """1X2 from ClubElo ratings (free, cross-league, long history). None if teams are not found."""
     try:
         ce = load_clubelo(dt.date.today().isoformat())
@@ -2151,7 +2151,7 @@ def clubelo_probs(league, home, away, neutral, d0):
     if not h or not a or h == a:
         return None
     eh, ea = float(pool[pool.Club == h].Elo.iloc[0]), float(pool[pool.Club == a].Elo.iloc[0])
-    return elo_to_1x2(1 / (1 + 10 ** (-(eh - ea + (0 if neutral else 100)) / 400)), d0)
+    return elo_to_1x2(1 / (1 + 10 ** (-(eh - ea + (0 if neutral else hfa)) / 400)), d0)
 
 
 # ======================= v13: ESPN feed, Understat xG, corners model =======================
@@ -3726,6 +3726,7 @@ def ui_analysis(years, half_life, wx_user, fuse_on):
         c = st.columns(2)
         max_risk = c[0].slider("Maximum risk per match %", 10, 60, 30, 1, key="an_risk")
         target = c[1].slider("Safe slip: minimum combined chance % (stress-tested)", 30, 90, 55, 1, key="an_target") / 100
+        max_legs = st.slider(LX("Safe slip: maximum number of matches", "السلبة الآمنة: أقصى عدد مباريات"), 1, 8, 3, 1, key="an_maxlegs")
     if use_auto and not st.session_state.get("feed_ran"):
         st.session_state["feed_ran"] = True
         with st.spinner("Updating injury and absence data for the next 3 days..."):
@@ -3740,7 +3741,7 @@ def ui_analysis(years, half_life, wx_user, fuse_on):
         b = bundles[r.league]
         f = None
         if b:
-            ext = clubelo_probs(r.league, r.home, r.away, bool(r.neutral), b["elo"]["d0"]) if use_ext else None
+            ext = clubelo_probs(r.league, r.home, r.away, bool(r.neutral), b["elo"]["d0"], b["elo"].get("hfa", 100.0)) if use_ext else None
             if r.league not in calibs:
                 calibs[r.league] = calib_load(r.league) if use_cal else None
             f = analyse_fixture(r, b, w_model, w_elo, ext, ctx_load(r.id) if use_auto else None, calibs[r.league])
@@ -3773,7 +3774,7 @@ def ui_analysis(years, half_life, wx_user, fuse_on):
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     st.caption("Risk % = chance the pick fails plus penalties for weak data, disagreeing sources, short rest or "
                "news-driven adjustments. Low <= 25, Medium <= 40, High above. Data grade: A = 30+ recent matches "
-               "for both teams, B = 18+, C = fewer. Verdict: Strong = low risk, sources agree, enough data; "
+               "for both teams, B = 18+, C = fewer. Verdict: Strong = low risk, sources agree, enough data and a calibrated league; "
                "OK = medium risk and no disagreement; Skip = anything else. 'Calibrated' = the league's settings were "
                "tested on its recent matches (Analysis settings or Data tab).")
 
@@ -3803,6 +3804,8 @@ def ui_analysis(years, half_life, wx_user, fuse_on):
         out = [l for l in legs if l["risk"]["risk"] > max_risk or (need_agree and l["agree"] == "split")]
         safe, comb = [], 1.0
         for l in ok:
+            if len(safe) >= max_legs:
+                break
             if safe and comb * l["risk"]["safe_p"] < target:
                 break
             safe.append(l)
@@ -3822,6 +3825,11 @@ def ui_analysis(years, half_life, wx_user, fuse_on):
             c[2].metric("Chance at most one fails", f"{(dist[:2].sum()) * 100:.1f}%")
             if comb < target:
                 st.warning("Even the safest single pick is below your target. No slip meets it.")
+            if raw < 0.5:
+                st.error(LX(f"Warning: the chance that EVERY pick in this slip wins is only {raw * 100:.0f}%, so it fails "
+                            f"more often than it wins. Every extra match lowers it further.",
+                            f"تحذير: احتمال أن تنجح كل اختيارات هذه السلبة معًا {raw * 100:.0f}% فقط، أي أنها تفشل أكثر "
+                            f"مما تنجح. وكل مباراة إضافية تخفضها أكثر."))
             st.caption("Built greedily from the lowest-risk picks while the stress-tested combined chance stays above "
                        "your target. Stress-tested = each pick's probability minus its model-risk penalties. "
                        "No outcome is guaranteed: even a 70% slip fails 3 times in 10.")
